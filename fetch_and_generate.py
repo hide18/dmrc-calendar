@@ -96,43 +96,78 @@ def fetch_events_via_playwright() -> list[dict]:
             )
         )
 
+        # ページ読み込み中のAPIレスポンスをキャプチャ
+        captured_events = []
+        captured_ids = set()
+
+        def handle_response(response):
+            """ページが自動で行うAPIリクエストのレスポンスを傍受"""
+            if "/public_events" in response.url and response.status == 200:
+                try:
+                    data = response.json()
+                    events = data.get("public_events", [])
+                    for ev in events:
+                        if ev["id"] not in captured_ids:
+                            captured_ids.add(ev["id"])
+                            captured_events.append(ev)
+                    print(f"  [自動キャプチャ] {response.url[:80]}... -> {len(events)}件", flush=True)
+                except Exception as e:
+                    print(f"  [自動キャプチャ] レスポンス解析エラー: {e}", flush=True)
+
+        page.on("response", handle_response)
+
         # TimeTreeページにアクセス（APIを同一オリジンから呼ぶために必要）
         print(f"TimeTreeページにアクセス中: {CALENDAR_URL}", flush=True)
         try:
             page.goto(CALENDAR_URL, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(3000)
+            print(f"  ページURL: {page.url}", flush=True)
+            print(f"  ページタイトル: {page.title()}", flush=True)
+            page.wait_for_timeout(5000)
         except Exception as e:
             print(f"ページ読み込みエラー（続行します）: {e}", flush=True)
-        print("ページ読み込み完了", flush=True)
 
-        # 複数月分のイベントデータを取得
+        # ページが自動ロードしたcookieを確認
+        cookies = page.context.cookies()
+        print(f"  Cookie数: {len(cookies)}", flush=True)
+        for c in cookies[:5]:
+            print(f"    {c['name']}: {c['value'][:30]}...", flush=True)
+
+        print("ページ読み込み完了", flush=True)
+        print(f"  自動キャプチャで取得済みイベント: {len(captured_events)}件", flush=True)
+
+        # 追加の月分をAPIで取得
         ranges = calculate_time_ranges()
-        all_events = []
-        seen_ids = set()
+        all_events = list(captured_events)
+        seen_ids = set(captured_ids)
 
         for i, time_range in enumerate(ranges):
-            api_path = (
-                f"/api/v2/public_calendars/{CALENDAR_SLUG}/public_events"
+            api_url = (
+                f"https://timetreeapp.com/api/v2/public_calendars/{CALENDAR_SLUG}/public_events"
                 f"?from={time_range['from']}&to={time_range['to']}&utc_offset=32400"
             )
-            print(f"  APIリクエスト {i + 1}/{len(ranges)}: {api_path[:80]}...", flush=True)
+            print(f"  APIリクエスト {i + 1}/{len(ranges)}: ...from={time_range['from']}&to={time_range['to']}", flush=True)
 
             try:
-                # response.json()ではなくtext()で取得し、Python側でパースする
-                # （Playwrightのevaluateでは大きなオブジェクトの転送に問題が出るため）
+                # page.evaluate内でfullURLを使用
                 response_text = page.evaluate("""
                     async (apiUrl) => {
                         try {
                             const response = await fetch(apiUrl);
-                            if (!response.ok) return '{"public_events":[]}';
-                            return await response.text();
+                            const status = response.status;
+                            const text = await response.text();
+                            return JSON.stringify({status: status, body: text});
                         } catch (e) {
-                            return '{"public_events":[]}';
+                            return JSON.stringify({status: -1, body: '{"public_events":[]}', error: e.message});
                         }
                     }
-                """, api_path)
+                """, api_url)
 
-                result = json.loads(response_text)
+                wrapper = json.loads(response_text)
+                print(f"    HTTP status: {wrapper['status']}", flush=True)
+                if wrapper.get('error'):
+                    print(f"    Fetch error: {wrapper['error']}", flush=True)
+
+                result = json.loads(wrapper['body'])
                 events = result.get("public_events", [])
                 new_count = 0
                 for event in events:
@@ -140,11 +175,11 @@ def fetch_events_via_playwright() -> list[dict]:
                         seen_ids.add(event["id"])
                         all_events.append(event)
                         new_count += 1
-                print(f"    → {len(events)}件取得（新規: {new_count}件）", flush=True)
+                print(f"    -> {len(events)}件取得 (新規: {new_count}件)", flush=True)
 
             except Exception as e:
                 import traceback
-                print(f"    → エラー: {e}", flush=True)
+                print(f"    -> エラー: {e}", flush=True)
                 traceback.print_exc()
 
         browser.close()
