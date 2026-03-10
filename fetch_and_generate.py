@@ -76,16 +76,34 @@ def calculate_time_ranges() -> list[dict]:
 
 def fetch_events_via_playwright() -> list[dict]:
     """Playwrightでブラウザを起動し、TimeTree APIからイベントデータを取得する"""
-    print("Playwrightでブラウザを起動中...")
+    print("Playwrightでブラウザを起動中...", flush=True)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
+        )
+        page = browser.new_page(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        )
 
         # TimeTreeページにアクセス（APIを同一オリジンから呼ぶために必要）
-        print(f"TimeTreeページにアクセス中: {CALENDAR_URL}")
-        page.goto(CALENDAR_URL, wait_until="networkidle")
-        print("ページ読み込み完了")
+        print(f"TimeTreeページにアクセス中: {CALENDAR_URL}", flush=True)
+        try:
+            page.goto(CALENDAR_URL, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(3000)
+        except Exception as e:
+            print(f"ページ読み込みエラー（続行します）: {e}", flush=True)
+        print("ページ読み込み完了", flush=True)
 
         # 複数月分のイベントデータを取得
         ranges = calculate_time_ranges()
@@ -97,7 +115,7 @@ def fetch_events_via_playwright() -> list[dict]:
                 f"/api/v2/public_calendars/{CALENDAR_SLUG}/public_events"
                 f"?from={time_range['from']}&to={time_range['to']}&utc_offset=32400"
             )
-            print(f"  APIリクエスト {i + 1}/{len(ranges)}: {api_path[:80]}...")
+            print(f"  APIリクエスト {i + 1}/{len(ranges)}: {api_path[:80]}...", flush=True)
 
             try:
                 # response.json()ではなくtext()で取得し、Python側でパースする
@@ -122,14 +140,16 @@ def fetch_events_via_playwright() -> list[dict]:
                         seen_ids.add(event["id"])
                         all_events.append(event)
                         new_count += 1
-                print(f"    → {len(events)}件取得（新規: {new_count}件）")
+                print(f"    → {len(events)}件取得（新規: {new_count}件）", flush=True)
 
             except Exception as e:
-                print(f"    → エラー: {e}")
+                import traceback
+                print(f"    → エラー: {e}", flush=True)
+                traceback.print_exc()
 
         browser.close()
 
-    print(f"合計: {len(all_events)}件のイベント取得完了")
+    print(f"合計: {len(all_events)}件のイベント取得完了", flush=True)
     return all_events
 
 
