@@ -42,7 +42,23 @@ jobs:
           pip install -r requirements.txt
           playwright install --with-deps chromium
 
+      - name: Playwright動作確認
+        run: |
+          python -c "from playwright.sync_api import sync_playwright; print('Playwright import OK')"
+          python -c "
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'])
+              page = browser.new_page()
+              page.goto('https://example.com', timeout=30000)
+              print(f'Page title: {page.title()}')
+              browser.close()
+              print('Browser launch OK')
+          "
+
       - name: イベントデータ取得 & ICSファイル生成
+        env:
+          PYTHONIOENCODING: utf-8
         run: python fetch_and_generate.py
 
       - name: GitHub Pages セットアップ

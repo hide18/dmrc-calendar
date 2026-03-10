@@ -326,4 +326,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        print(f"\n致命的エラー: {e}", flush=True)
+        traceback.print_exc()
+        sys.exit(1)
