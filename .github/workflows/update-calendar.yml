@@ -1,0 +1,59 @@
+name: Update DMRC Calendar
+
+on:
+  # 6時間ごとに自動実行
+  schedule:
+    - cron: '0 */6 * * *'
+  # 手動実行も可能
+  workflow_dispatch:
+  # mainブランチへのpush時にも実行
+  push:
+    branches: [main]
+
+# GitHub Pages デプロイに必要な権限
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同時実行を防止
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 依存パッケージインストール
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: イベントデータ取得 & ICSファイル生成
+        run: python fetch_and_generate.py
+
+      - name: GitHub Pages セットアップ
+        uses: actions/configure-pages@v5
+
+      - name: アーティファクトアップロード
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - name: GitHub Pages デプロイ
+        id: deployment
+        uses: actions/deploy-pages@v4
