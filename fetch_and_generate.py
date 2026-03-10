@@ -24,58 +24,16 @@ MONTHS_BEFORE = 1
 MONTHS_AFTER = 4
 
 
-def calculate_time_ranges() -> list[dict]:
-    """
-    現在日時を基準にAPIリクエスト用のタイムスタンプ範囲を計算する。
-
-    TimeTree APIは、カレンダーグリッド（月曜始まり）の正確な境界値を要求する。
-    各月について:
-      - from = その月の1日を含む週の月曜日 00:00 JST（ミリ秒UTC）
-      - to   = その月の末日を含む週の翌月曜日 00:00 JST（ミリ秒UTC）
-    """
-    now = datetime.now(JST)
-    ranges = []
-
-    for offset in range(-MONTHS_BEFORE, MONTHS_AFTER + 1):
-        year = now.year
-        month = now.month + offset
-        while month <= 0:
-            month += 12
-            year -= 1
-        while month > 12:
-            month -= 12
-            year += 1
-
-        # 月初日
-        first_day = datetime(year, month, 1, tzinfo=JST)
-        # 月初日の曜日（Monday=0, Sunday=6）
-        first_weekday = first_day.weekday()
-        # グリッド開始 = その月の1日を含む週の月曜日
-        grid_start = first_day - timedelta(days=first_weekday)
-
-        # 月末日
-        if month == 12:
-            last_day = datetime(year + 1, 1, 1, tzinfo=JST) - timedelta(days=1)
-        else:
-            last_day = datetime(year, month + 1, 1, tzinfo=JST) - timedelta(days=1)
-        # 月末日の曜日
-        last_weekday = last_day.weekday()
-        # グリッド終了 = 月末日を含む週の翌月曜日 (Sunday+1)
-        grid_end = last_day + timedelta(days=(7 - last_weekday))
-
-        from_ts = int(grid_start.timestamp() * 1000)
-        to_ts = int(grid_end.timestamp() * 1000)
-
-        ranges.append({
-            "from": from_ts,
-            "to": to_ts,
-        })
-
-    return ranges
-
 
 def fetch_events_via_playwright() -> list[dict]:
-    """Playwrightでブラウザを起動し、TimeTree APIからイベントデータを取得する"""
+    """
+    Playwrightでブラウザを起動し、TimeTreeカレンダーの月ナビゲーションを操作して
+    各月のAPIレスポンスを傍受・収集する。
+
+    TimeTree APIはセッション内の現在表示月に対するリクエストのみを受け付けるため、
+    ページ上の「次月/前月」ボタンをクリックして月を切り替え、
+    その際に発生するAPIレスポンスをキャプチャする方式を採用している。
+    """
     print("Playwrightでブラウザを起動中...", flush=True)
 
     with sync_playwright() as p:
@@ -89,98 +47,68 @@ def fetch_events_via_playwright() -> list[dict]:
             ],
         )
         page = browser.new_page(
+            viewport={"width": 1280, "height": 900},
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/120.0.0.0 Safari/537.36"
-            )
+            ),
         )
 
-        # ページ読み込み中のAPIレスポンスをキャプチャ
-        captured_events = []
-        captured_ids = set()
+        all_events = []
+        seen_ids = set()
 
         def handle_response(response):
-            """ページが自動で行うAPIリクエストのレスポンスを傍受"""
+            """ページが行うAPIリクエストのレスポンスを傍受してイベントを蓄積"""
             if "/public_events" in response.url and response.status == 200:
                 try:
                     data = response.json()
                     events = data.get("public_events", [])
+                    new_count = 0
                     for ev in events:
-                        if ev["id"] not in captured_ids:
-                            captured_ids.add(ev["id"])
-                            captured_events.append(ev)
-                    print(f"  [自動キャプチャ] {response.url[:80]}... -> {len(events)}件", flush=True)
-                except Exception as e:
-                    print(f"  [自動キャプチャ] レスポンス解析エラー: {e}", flush=True)
+                        if ev["id"] not in seen_ids:
+                            seen_ids.add(ev["id"])
+                            all_events.append(ev)
+                            new_count += 1
+                    print(f"  [キャプチャ] {len(events)}件 (新規: {new_count}件)", flush=True)
+                except Exception:
+                    pass
 
         page.on("response", handle_response)
 
-        # TimeTreeページにアクセス（APIを同一オリジンから呼ぶために必要）
+        # TimeTreeページにアクセス（当月のイベントが自動取得される）
         print(f"TimeTreeページにアクセス中: {CALENDAR_URL}", flush=True)
         try:
             page.goto(CALENDAR_URL, wait_until="domcontentloaded", timeout=60000)
-            print(f"  ページURL: {page.url}", flush=True)
-            print(f"  ページタイトル: {page.title()}", flush=True)
             page.wait_for_timeout(5000)
+            print(f"  ページタイトル: {page.title()}", flush=True)
         except Exception as e:
-            print(f"ページ読み込みエラー（続行します）: {e}", flush=True)
+            print(f"  ページ読み込みエラー（続行します）: {e}", flush=True)
 
-        # ページが自動ロードしたcookieを確認
-        cookies = page.context.cookies()
-        print(f"  Cookie数: {len(cookies)}", flush=True)
-        for c in cookies[:5]:
-            print(f"    {c['name']}: {c['value'][:30]}...", flush=True)
+        print(f"  当月キャプチャ済み: {len(all_events)}件", flush=True)
 
-        print("ページ読み込み完了", flush=True)
-        print(f"  自動キャプチャで取得済みイベント: {len(captured_events)}件", flush=True)
-
-        # 追加の月分をAPIで取得
-        ranges = calculate_time_ranges()
-        all_events = list(captured_events)
-        seen_ids = set(captured_ids)
-
-        for i, time_range in enumerate(ranges):
-            api_url = (
-                f"https://timetreeapp.com/api/v2/public_calendars/{CALENDAR_SLUG}/public_events"
-                f"?from={time_range['from']}&to={time_range['to']}&utc_offset=32400"
-            )
-            print(f"  APIリクエスト {i + 1}/{len(ranges)}: ...from={time_range['from']}&to={time_range['to']}", flush=True)
-
+        # 「次月」ボタン(_94ajna2)をクリックして将来月のイベントを取得
+        print(f"次月ボタンで{MONTHS_AFTER}ヶ月分のイベントを取得中...", flush=True)
+        for i in range(MONTHS_AFTER):
             try:
-                # page.evaluate内でfullURLを使用
-                response_text = page.evaluate("""
-                    async (apiUrl) => {
-                        try {
-                            const response = await fetch(apiUrl);
-                            const status = response.status;
-                            const text = await response.text();
-                            return JSON.stringify({status: status, body: text});
-                        } catch (e) {
-                            return JSON.stringify({status: -1, body: '{"public_events":[]}', error: e.message});
-                        }
-                    }
-                """, api_url)
-
-                wrapper = json.loads(response_text)
-                print(f"    HTTP status: {wrapper['status']}", flush=True)
-                if wrapper.get('error'):
-                    print(f"    Fetch error: {wrapper['error']}", flush=True)
-
-                result = json.loads(wrapper['body'])
-                events = result.get("public_events", [])
-                new_count = 0
-                for event in events:
-                    if event["id"] not in seen_ids:
-                        seen_ids.add(event["id"])
-                        all_events.append(event)
-                        new_count += 1
-                print(f"    -> {len(events)}件取得 (新規: {new_count}件)", flush=True)
-
+                next_btn = page.locator("button._94ajna2")
+                next_btn.click(timeout=5000)
+                page.wait_for_timeout(3000)
+                print(f"  次月 {i + 1}/{MONTHS_AFTER} -> 合計: {len(all_events)}件", flush=True)
             except Exception as e:
-                import traceback
-                print(f"    -> エラー: {e}", flush=True)
-                traceback.print_exc()
+                print(f"  次月クリック失敗 {i + 1}: {e}", flush=True)
+
+        # 「前月」ボタン(_94ajna1)で元に戻り、さらに過去月を取得
+        total_back = MONTHS_AFTER + MONTHS_BEFORE
+        print(f"前月ボタンで{total_back}ヶ月戻り、過去{MONTHS_BEFORE}ヶ月分を取得中...", flush=True)
+        for i in range(total_back):
+            try:
+                prev_btn = page.locator("button._94ajna1")
+                prev_btn.click(timeout=5000)
+                page.wait_for_timeout(3000)
+                print(f"  前月 {i + 1}/{total_back} -> 合計: {len(all_events)}件", flush=True)
+            except Exception as e:
+                print(f"  前月クリック失敗 {i + 1}: {e}", flush=True)
 
         browser.close()
 
