@@ -127,7 +127,151 @@ def escape_ics_text(text: str) -> str:
     return text
 
 
-def generate_ics(events: list[dict]) -> str:
+def collect_event_images(event: dict) -> list[str]:
+    """イベントから全画像URLをリストで返す（cover + overview）"""
+    images = event.get("images", {})
+    if not images:
+        return []
+    urls = []
+    for img in images.get("cover", []):
+        if img.get("url"):
+            urls.append(img["url"])
+    for img in images.get("overview", []):
+        if img.get("url"):
+            urls.append(img["url"])
+    return urls
+
+
+def generate_gallery_html(events: list[dict], base_url: str) -> str:
+    """
+    全イベントの画像ギャラリーを1つのHTMLに生成する。
+    URLフラグメント（#event-ID）で各イベントにジャンプし、
+    そのイベントの画像をスワイプ/スクロールで閲覧できる。
+    """
+    events_with_images = []
+    for ev in sorted(events, key=lambda e: e.get("start_at", 0)):
+        imgs = collect_event_images(ev)
+        if imgs:
+            start_dt = datetime.fromtimestamp(ev["start_at"] / 1000, tz=timezone.utc).astimezone(JST)
+            events_with_images.append({
+                "id": ev["id"],
+                "title": ev.get("title", ""),
+                "date": start_dt.strftime("%Y/%m/%d"),
+                "location": ev.get("location_name", ""),
+                "images": imgs,
+            })
+
+    events_json = json.dumps(events_with_images, ensure_ascii=False)
+
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=3.0">
+<title>ドマレコ イベント画像</title>
+<style>
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #000; color: #fff;
+  -webkit-text-size-adjust: 100%;
+}}
+.header {{
+  position: sticky; top: 0; z-index: 10;
+  background: rgba(0,0,0,0.85); backdrop-filter: blur(10px);
+  padding: 12px 16px;
+  border-bottom: 1px solid #333;
+}}
+.header h1 {{ font-size: 1.1em; font-weight: 600; }}
+.event {{
+  padding: 16px; border-bottom: 1px solid #222;
+}}
+.event-title {{
+  font-size: 1em; font-weight: 600;
+  margin-bottom: 4px;
+}}
+.event-meta {{
+  font-size: 0.8em; color: #999;
+  margin-bottom: 12px;
+}}
+.gallery {{
+  display: flex; gap: 8px;
+  overflow-x: auto; scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 8px;
+}}
+.gallery::-webkit-scrollbar {{ display: none; }}
+.gallery img {{
+  scroll-snap-align: center;
+  flex-shrink: 0;
+  width: 85vw; max-width: 500px;
+  height: auto; border-radius: 8px;
+  object-fit: contain; background: #111;
+}}
+.gallery.single img {{
+  width: 100%; max-width: 100%;
+}}
+.img-count {{
+  font-size: 0.75em; color: #666;
+  margin-top: 6px; text-align: center;
+}}
+.no-images {{
+  text-align: center; padding: 60px 20px;
+  color: #666; font-size: 0.9em;
+}}
+.target-highlight {{
+  animation: highlight 2s ease-out;
+}}
+@keyframes highlight {{
+  0% {{ background: rgba(46,204,135,0.3); }}
+  100% {{ background: transparent; }}
+}}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>ドマレコ イベント画像</h1>
+</div>
+<div id="events"></div>
+<script>
+const events = {events_json};
+const container = document.getElementById('events');
+if (events.length === 0) {{
+  container.innerHTML = '<div class="no-images">画像付きイベントはありません</div>';
+}} else {{
+  events.forEach(ev => {{
+    const div = document.createElement('div');
+    div.className = 'event';
+    div.id = 'event-' + ev.id;
+    const loc = ev.location ? ' / ' + ev.location : '';
+    const singleClass = ev.images.length === 1 ? ' single' : '';
+    div.innerHTML =
+      '<div class="event-title">' + escapeHtml(ev.title) + '</div>' +
+      '<div class="event-meta">' + ev.date + loc + '</div>' +
+      '<div class="gallery' + singleClass + '">' +
+        ev.images.map(url => '<img src="' + url + '" loading="lazy" alt="">').join('') +
+      '</div>' +
+      (ev.images.length > 1 ? '<div class="img-count">' + ev.images.length + '枚</div>' : '');
+    container.appendChild(div);
+  }});
+  // URLフラグメントで該当イベントにスクロール
+  if (location.hash) {{
+    const target = document.getElementById(location.hash.slice(1));
+    if (target) {{
+      target.scrollIntoView({{ behavior: 'smooth' }});
+      target.classList.add('target-highlight');
+    }}
+  }}
+}}
+function escapeHtml(s) {{
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}}
+</script>
+</body>
+</html>"""
+
+
+def generate_ics(events: list[dict], gallery_base_url: str) -> str:
     """イベントリストからICSファイルの文字列を生成する"""
     now_utc = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
@@ -140,7 +284,6 @@ def generate_ics(events: list[dict]) -> str:
         "X-WR-CALNAME:ドマレコ スケジュール",
         "X-WR-TIMEZONE:Asia/Tokyo",
         f"X-GENERATED-AT:{now_utc}",
-        # タイムゾーン定義
         "BEGIN:VTIMEZONE",
         "TZID:Asia/Tokyo",
         "BEGIN:STANDARD",
@@ -163,17 +306,23 @@ def generate_ics(events: list[dict]) -> str:
         url = event.get("url", "")
         updated_at_ms = event.get("updated_at", 0)
 
-        # タイムスタンプをdatetimeに変換
         start_dt = datetime.fromtimestamp(start_at_ms / 1000, tz=timezone.utc)
         end_dt = datetime.fromtimestamp(until_at_ms / 1000, tz=timezone.utc) if until_at_ms else None
         updated_dt = datetime.fromtimestamp(updated_at_ms / 1000, tz=timezone.utc)
-
         start_jst = start_dt.astimezone(JST)
 
         # 説明文を構築
         description_parts = []
         if note:
             description_parts.append(note)
+
+        # 画像ギャラリーリンク
+        event_images = collect_event_images(event)
+        if event_images:
+            gallery_url = f"{gallery_base_url}#event-{event_id}"
+            img_label = f"画像 ({len(event_images)}枚)" if len(event_images) > 1 else "画像"
+            description_parts.append(f"\n{img_label}: {gallery_url}")
+
         if link_url:
             description_parts.append(f"\nチケット/詳細: {link_url}")
         if url:
@@ -219,6 +368,13 @@ def generate_ics(events: list[dict]) -> str:
 
 
 def main():
+    # GitHub PagesのベースURL（環境変数で上書き可能）
+    pages_base_url = os.environ.get(
+        "PAGES_BASE_URL",
+        "https://hide18.github.io/dmrc-calendar",
+    )
+    gallery_url = f"{pages_base_url}/gallery.html"
+
     # イベントデータ取得
     events = fetch_events_via_playwright()
 
@@ -226,27 +382,35 @@ def main():
         print("エラー: イベントが取得できませんでした")
         sys.exit(1)
 
-    # ICSファイル生成
-    ics_content = generate_ics(events)
-
     # 出力ディレクトリ作成
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # ICSファイル書き出し
+    # ICSファイル生成
+    ics_content = generate_ics(events, gallery_url)
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         f.write(ics_content)
+    print(f"\nICSファイルを生成しました: {OUTPUT_FILE}", flush=True)
 
-    print(f"\nICSファイルを生成しました: {OUTPUT_FILE}")
+    # 画像ギャラリーHTML生成
+    gallery_html = generate_gallery_html(events, pages_base_url)
+    gallery_path = os.path.join(OUTPUT_DIR, "gallery.html")
+    with open(gallery_path, "w", encoding="utf-8") as f:
+        f.write(gallery_html)
+
+    img_count = sum(1 for ev in events if collect_event_images(ev))
+    print(f"画像ギャラリーを生成しました: {gallery_path} ({img_count}件のイベントに画像あり)", flush=True)
 
     # イベント一覧を表示
-    print("\n--- イベント一覧 ---")
+    print("\n--- イベント一覧 ---", flush=True)
     for event in sorted(events, key=lambda e: e.get("start_at", 0)):
         start_dt = datetime.fromtimestamp(event["start_at"] / 1000, tz=timezone.utc)
         start_jst = start_dt.astimezone(JST)
         title = event.get("title", "無題")
         location = event.get("location_name", "")
+        imgs = collect_event_images(event)
         loc_str = f" @ {location}" if location else ""
-        print(f"  {start_jst.strftime('%Y/%m/%d')} {title}{loc_str}")
+        img_str = f" [{len(imgs)}img]" if imgs else ""
+        print(f"  {start_jst.strftime('%Y/%m/%d')} {title}{loc_str}{img_str}")
 
     # index.htmlも生成（GitHub Pagesアクセス確認用）
     index_html = f"""<!DOCTYPE html>
@@ -260,6 +424,8 @@ def main():
         h1 {{ font-size: 1.4em; }}
         .url {{ background: #f0f0f0; padding: 12px; border-radius: 8px; word-break: break-all; font-family: monospace; font-size: 0.9em; }}
         .steps {{ line-height: 1.8; }}
+        .links {{ margin-top: 20px; }}
+        .links a {{ color: #2ECC87; text-decoration: none; }}
         .updated {{ color: #888; font-size: 0.85em; margin-top: 30px; }}
     </style>
 </head>
@@ -273,10 +439,13 @@ def main():
         <p>3.「照会するカレンダーを追加」を選択</p>
         <p>4. 以下のURLを入力:</p>
     </div>
-    <div class="url" id="ics-url">（GitHub PagesのURLに置き換えてください）</div>
+    <div class="url" id="ics-url"></div>
+    <div class="links">
+        <p><a href="gallery.html">イベント画像ギャラリー ({img_count}件)</a></p>
+    </div>
     <p class="updated">最終更新: {datetime.now(JST).strftime('%Y年%m月%d日 %H:%M JST')}</p>
     <script>
-        const url = window.location.href.replace('index.html', '') + 'dmrc_schedule.ics';
+        const url = window.location.href.replace('index.html', '').replace(/\\/$/, '') + '/dmrc_schedule.ics';
         document.getElementById('ics-url').textContent = url;
     </script>
 </body>
@@ -285,7 +454,7 @@ def main():
     with open(os.path.join(OUTPUT_DIR, "index.html"), "w", encoding="utf-8") as f:
         f.write(index_html)
 
-    print(f"\nindex.htmlを生成しました: {os.path.join(OUTPUT_DIR, 'index.html')}")
+    print(f"\nindex.htmlを生成しました: {os.path.join(OUTPUT_DIR, 'index.html')}", flush=True)
 
 
 if __name__ == "__main__":
