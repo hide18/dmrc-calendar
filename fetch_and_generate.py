@@ -230,38 +230,45 @@ body {{
 </head>
 <body>
 <div class="header">
-  <h1>ドマレコ イベント画像</h1>
+  <h1 id="page-title">ドマレコ イベント画像</h1>
+  <div id="back-link"></div>
 </div>
 <div id="events"></div>
 <script>
 const events = {events_json};
 const container = document.getElementById('events');
-if (events.length === 0) {{
-  container.innerHTML = '<div class="no-images">画像付きイベントはありません</div>';
+const targetId = location.hash ? location.hash.slice(1) : null;
+// フラグメント指定時はそのイベントのみ表示
+const displayEvents = targetId
+  ? events.filter(ev => 'event-' + ev.id === targetId)
+  : events;
+
+if (displayEvents.length === 0) {{
+  container.innerHTML = '<div class="no-images">画像が見つかりません</div>';
 }} else {{
-  events.forEach(ev => {{
+  if (targetId && displayEvents.length === 1) {{
+    // 単一イベント表示モード：タイトルをイベント名に変更
+    document.getElementById('page-title').textContent = displayEvents[0].title;
+    document.getElementById('back-link').innerHTML =
+      '<a href="gallery.html" style="color:#2ECC87;font-size:0.85em;text-decoration:none;">← 全イベント一覧</a>';
+  }}
+  displayEvents.forEach(ev => {{
     const div = document.createElement('div');
     div.className = 'event';
     div.id = 'event-' + ev.id;
     const loc = ev.location ? ' / ' + ev.location : '';
     const singleClass = ev.images.length === 1 ? ' single' : '';
+    const showTitle = targetId ? '' :
+      '<div class="event-title">' + escapeHtml(ev.title) + '</div>';
     div.innerHTML =
-      '<div class="event-title">' + escapeHtml(ev.title) + '</div>' +
+      showTitle +
       '<div class="event-meta">' + ev.date + loc + '</div>' +
       '<div class="gallery' + singleClass + '">' +
-        ev.images.map(url => '<img src="' + url + '" loading="lazy" alt="">').join('') +
+        ev.images.map(url => '<img src="' + url + '" alt="">').join('') +
       '</div>' +
-      (ev.images.length > 1 ? '<div class="img-count">' + ev.images.length + '枚</div>' : '');
+      (ev.images.length > 1 ? '<div class="img-count">' + ev.images.length + '枚 (横スワイプ)</div>' : '');
     container.appendChild(div);
   }});
-  // URLフラグメントで該当イベントにスクロール
-  if (location.hash) {{
-    const target = document.getElementById(location.hash.slice(1));
-    if (target) {{
-      target.scrollIntoView({{ behavior: 'smooth' }});
-      target.classList.add('target-highlight');
-    }}
-  }}
 }}
 function escapeHtml(s) {{
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
