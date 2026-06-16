@@ -72,3 +72,13 @@ jobs:
       - name: GitHub Pages デプロイ
         id: deployment
         uses: actions/deploy-pages@v4
+
+  workflow-keepalive:
+    # リポジトリ更新がなくても、GitHubにscheduled workflowを自動無効化されないようにする
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: scheduled workflowの自動無効化を予防
+        uses: liskin/gh-workflow-keepalive@v1
