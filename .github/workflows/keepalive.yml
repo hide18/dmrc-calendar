@@ -1,0 +1,133 @@
+name: Keepalive (schedule無効化防止)
+
+# GitHubは約60日間リポジトリに「ユーザー起因の」アクティビティがないと
+# schedule ワークフローを disabled_inactivity にする。
+# GITHUB_TOKEN の commit はアクティビティに含まれないため、
+# ユーザー発行の PAT (KEEPALIVE_PAT) で定期 commit してタイマーをリセットする。
+
+on:
+  schedule:
+    # 毎月1日 03:00 UTC（60日制限に対して十分な頻度）
+    - cron: '0 3 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+
+      - name: 活性維持コミット
+        id: bump
+        env:
+          KEEPALIVE_PAT: ${{ secrets.KEEPALIVE_PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${KEEPALIVE_PAT:-}" ]; then
+            echo "missing_secret=true" >> "$GITHUB_OUTPUT"
+            echo "::error::Secrets.KEEPALIVE_PAT が未設定です。README のセットアップ手順を実施してください。"
+            exit 1
+          fi
+          echo "missing_secret=false" >> "$GITHUB_OUTPUT"
+
+          mkdir -p .github
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .github/last-keepalive
+
+          git config user.name "dmrc-keepalive"
+          git config user.email "108858275+hide18@users.noreply.github.com"
+          git add .github/last-keepalive
+
+          if git diff --staged --quiet; then
+            echo "変更なし（スキップ）"
+            exit 0
+          fi
+
+          git commit -m "chore: keepalive $(date -u +%Y-%m-%d)"
+          git remote set-url origin "https://x-access-token:${KEEPALIVE_PAT}@github.com/${REPO}.git"
+          git push origin HEAD:main
+          echo "keepalive push 完了"
+
+      - name: 失敗時に Issue で通知
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const label = 'keepalive';
+            const title = '【要対応】カレンダー自動更新が止まる可能性があります';
+            const enableUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/workflows/update-calendar.yml`;
+            const keepaliveUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/workflows/keepalive.yml`;
+            const secretsUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/settings/secrets/actions`;
+            const body = [
+              '## 状況',
+              'keepalive ワークフローが失敗しました。',
+              'このまま約60日リポジトリにアクティビティがないと、カレンダー更新の schedule が GitHub により自動停止します。',
+              '',
+              '## やること（許可ボタン相当）',
+              `1. [Update DMRC Calendar](${enableUrl}) を開き、無効なら **Enable workflow** → **Run workflow**`,
+              `2. [Keepalive](${keepaliveUrl}) も同様に **Enable workflow** → **Run workflow**`,
+              `3. [Actions secrets](${secretsUrl}) に \`KEEPALIVE_PAT\` があるか確認（期限切れなら再発行して更新）`,
+              '',
+              '詳細は README の「ワンタイムセットアップ」を参照。',
+              '',
+              `_自動作成: run ${context.runId}_`,
+            ].join('\n');
+
+            // label が無ければ作る
+            try {
+              await github.rest.issues.getLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: label,
+              });
+            } catch (e) {
+              if (e.status === 404) {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label,
+                  color: 'd93f0b',
+                  description: 'keepalive / schedule無効化対策',
+                });
+              } else {
+                throw e;
+              }
+            }
+
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: label,
+              per_page: 10,
+            });
+
+            const existing = issues.data.find((i) => i.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `再失敗を検知しました。\n\n${body}`,
+              });
+              core.info(`既存 Issue #${existing.number} にコメント追加`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: [label],
+              });
+              core.info(`Issue #${created.data.number} を作成`);
+            }

@@ -7,8 +7,12 @@ on:
   # 手動実行も可能
   workflow_dispatch:
   # mainブランチへのpush時にも実行
+  # keepalive 専用コミットでは再実行しない（無限ループ防止）
   push:
     branches: [main]
+    paths-ignore:
+      - '.github/last-keepalive'
+      - '.github/workflows/keepalive.yml'
 
 # GitHub Pages デプロイに必要な権限
 permissions:
